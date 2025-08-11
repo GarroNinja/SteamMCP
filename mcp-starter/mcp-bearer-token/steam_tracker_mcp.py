@@ -44,6 +44,19 @@ STEAM_STORE_API_BASE_URL = "https://store.steampowered.com/api"
 STEAM_WEB_API_BASE_URL = "https://steamwebapi.com"
 COUNTRY_CODE = "IN"
 
+# Global cache for deals and popular games
+deals_cache = {
+    "last_updated": None,
+    "deals": [],
+    "cache_file": "steam_deals_cache.json"
+}
+
+# Top 50 popular games for instant price responses
+popular_games_cache = {
+    "games": [],
+    "cache_file": "popular_games_cache.json"
+}
+
 # Validate required environment variables
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL must be set in .env file")
@@ -413,12 +426,28 @@ price_tracker = PriceTracker(db_manager, email_service)
 
 # Background scheduler for price checks
 def run_scheduler():
-    """Run background scheduler for price checks."""
+    """Run background scheduler for price checks and cache refresh."""
     schedule.every(12).hours.do(lambda: asyncio.run(price_tracker.check_price_alerts()))
+    
+    # Schedule cache refresh every 6 hours
+    schedule.every(6).hours.do(refresh_deals_cache)
     
     while True:
         schedule.run_pending()
         time.sleep(60)
+
+def refresh_deals_cache():
+    """Refresh the deals cache (called by scheduler)."""
+    try:
+        logger.info("🔄 Scheduled cache refresh...")
+        # Run the async function in a new event loop
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(fetch_and_cache_deals())
+        loop.close()
+    except Exception as e:
+        logger.error(f"Error refreshing cache: {e}")
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -466,6 +495,17 @@ AddPriceAlertDescription = RichToolDescription(
 )
 
 # MCP Tools
+@mcp.tool(description="Refresh the deals cache with fresh Steam data")
+async def refresh_deals_cache_tool() -> str:
+    """Manually refresh the deals cache."""
+    try:
+        logger.info("🔄 Manual cache refresh requested...")
+        deals = await fetch_and_cache_deals()
+        return f"✅ Cache refreshed successfully! Found {len(deals)} deals with 10%+ discounts."
+    except Exception as e:
+        logger.error(f"Cache refresh failed: {e}")
+        return f"❌ Cache refresh failed: {str(e)}"
+
 @mcp.tool(description="Get information about this Steam Price Tracker MCP server")
 async def about() -> dict[str, str]:
     """Get detailed information about this MCP server."""
@@ -854,82 +894,48 @@ async def subscribe_daily_deals(
             logger.error(f"Error subscribing to daily deals: {e}")
             return f"❌ Error subscribing to daily deals: {str(e)}"
 
-@mcp.tool(description="Get customized Steam deals with highest discounts based on genre and game age preferences, filtered for popular games")
+@mcp.tool(description="Get today's top Steam deals and send them via email")
 async def send_top_deals_today(
-    email: Annotated[str, Field(description="Email address to send the deals to")],
-    genre: Annotated[str, Field(description="Preferred genre: Action, Adventure, RPG, Strategy, Simulation, Racing, Sports, Indie, Multiplayer, Puzzle, Horror, Fighting, or 'Any' for all genres")] = "Any",
-    age_preference: Annotated[str, Field(description="Game age preference: 'old' (2010-2015), 'middle' (2016-2020), 'recent' (2021+), or 'any' for all ages")] = "any"
+    email: Annotated[str, Field(description="Email address to send the deals to")]
 ) -> str:
-    """Get customized Steam deals based on user preferences and send via email immediately."""
+    """Get today's curated Steam deals and send via email immediately."""
     # Validate email
     if not email or "@" not in email:
-        return "❌ Valid email address is required. Please use: send_top_deals_today(email=\"your@email.com\", genre=\"Action\", age_preference=\"recent\")"
-    
-    # Validate inputs
-    valid_genres = ["Action", "Adventure", "RPG", "Strategy", "Simulation", "Racing", "Sports", "Indie", "Multiplayer", "Puzzle", "Horror", "Fighting", "Any"]
-    valid_ages = ["old", "middle", "recent", "any"]
-    
-    if genre not in valid_genres:
-        return f"❌ Invalid genre. Choose from: {', '.join(valid_genres)}"
-    
-    if age_preference not in valid_ages:
-        return f"❌ Invalid age preference. Choose from: {', '.join(valid_ages)}"
+        return "❌ Valid email address is required. Please use: send_top_deals_today(email=\"your@email.com\")"
     
     try:
-        logger.info(f"Fetching {genre} deals ({age_preference} games) for {email}")
+        logger.info(f"Sending curated deals to {email}")
         
-        # Get customized top deals with timeout protection
-        import asyncio
-        
-        async def fetch_deals_with_timeout():
-            if genre == "Any" and age_preference == "any":
-                # For general "any" requests, use the original working method
-                return await get_todays_top_deals()
-            else:
-                # For specific preferences, use the customized method
-                return await get_customized_top_deals(genre, age_preference)
-        
-        try:
-            # Use timeout to prevent MCP server timeout
-            top_deals = await asyncio.wait_for(fetch_deals_with_timeout(), timeout=25.0)
-        except asyncio.TimeoutError:
-            logger.warning(f"Deals fetching timed out, trying fallback...")
-            # Emergency fallback - get any deals quickly
-            top_deals = await get_todays_top_deals()
+        # Get cached deals - instant response!
+        top_deals = await get_cached_deals()
         
         if not top_deals:
-            # If still no deals, try one more emergency fallback
-            logger.warning("⚠️ No deals found from primary methods, trying emergency fallback...")
-            try:
-                top_deals = await asyncio.wait_for(get_emergency_deals(), timeout=10.0)
-                logger.info(f"Emergency fallback returned {len(top_deals) if top_deals else 0} deals")
-            except Exception as e:
-                logger.error(f"Emergency fallback failed: {e}")
-                top_deals = []
+            logger.warning("No deals in cache, trying emergency fallback")
+            top_deals = await get_emergency_deals()
         
         if not top_deals:
-            return f"❌ No {genre} deals found for {age_preference} games today. Steam API might be slow. Try again later."
+            return "❌ No deals available right now. Try refreshing the cache or try again later."
         
         # Ensure we have valid deals before sending email
-        valid_deals = [deal for deal in top_deals if deal.get('name') and deal.get('discount', 0) > 0]
+        valid_deals = [deal for deal in top_deals if deal.get('name') and deal.get('discount', 0) >= 0]
         
         if not valid_deals:
-            return f"❌ Found deals but they have invalid data. Try again later."
+            return "❌ Found deals but they have invalid data. Try refreshing the cache."
         
         # Send email with deals
-        email_sent = await send_deals_email(email, valid_deals, is_immediate=True, genre=genre, age_preference=age_preference)
+        email_sent = await send_deals_email(email, valid_deals, is_immediate=True)
         
         if email_sent:
             max_discount = max(deal['discount'] for deal in valid_deals) if valid_deals else 0
-            return f"📧 ✅ Top {genre} Steam deals ({age_preference} games) sent to {email}!\n\nFound {len(valid_deals)} popular games with discounts up to {max_discount}% OFF!"
+            return f"📧 ✅ Top Steam deals sent to {email}!\n\nFound {len(valid_deals)} curated games with discounts up to {max_discount}% OFF!"
         else:
             return f"❌ Failed to send email to {email}. Please check the email address and try again."
             
     except Exception as e:
-        logger.error(f"Error sending customized top deals: {e}")
+        logger.error(f"Error sending top deals: {e}")
         return f"❌ Error getting top deals: {str(e)}"
 
-async def get_customized_top_deals(genre: str, age_preference: str) -> list:
+async def get_customized_top_deals_DEPRECATED(genre: str, age_preference: str) -> list:
     """Get customized Steam deals based on genre and age preferences, filtering for popular games."""
     try:
         logger.info(f"Searching for {genre} deals in {age_preference} games...")
@@ -1142,6 +1148,217 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
                 pass
         return []
 
+async def load_deals_cache() -> dict:
+    """Load deals from cache file."""
+    try:
+        if os.path.exists(deals_cache["cache_file"]):
+            with open(deals_cache["cache_file"], 'r') as f:
+                cache_data = json.load(f)
+                logger.info(f"Loaded {len(cache_data.get('deals', []))} deals from cache")
+                return cache_data
+    except Exception as e:
+        logger.error(f"Error loading cache: {e}")
+    
+    return {"last_updated": None, "deals": []}
+
+async def save_deals_cache(deals: list):
+    """Save deals to cache file."""
+    try:
+        cache_data = {
+            "last_updated": datetime.now().isoformat(),
+            "deals": deals
+        }
+        
+        with open(deals_cache["cache_file"], 'w') as f:
+            json.dump(cache_data, f, indent=2)
+        
+        # Update global cache
+        deals_cache["last_updated"] = cache_data["last_updated"]
+        deals_cache["deals"] = deals
+        
+        logger.info(f"Saved {len(deals)} deals to cache")
+        
+    except Exception as e:
+        logger.error(f"Error saving cache: {e}")
+
+async def fetch_and_cache_deals():
+    """Fetch curated deals from Steam and cache them."""
+    logger.info("🔍 Fetching curated Steam deals...")
+    
+    # Curated list of popular games that frequently have good deals
+    popular_games = [
+        271590,   # GTA V
+        292030,   # The Witcher 3
+        377160,   # Fallout 4
+        1174180,  # Red Dead Redemption 2
+        489830,   # The Elder Scrolls V: Skyrim Special Edition
+        1091500,  # Cyberpunk 2077
+        1245620,  # ELDEN RING
+        1086940,  # Baldur's Gate 3
+        413150,   # Stardew Valley
+        594650,   # Hunt: Showdown
+        252490,   # Rust
+        322330,   # Don't Starve Together
+        394360,   # Hearts of Iron IV
+        236850,   # Europa Universalis IV
+        730,      # Counter-Strike 2
+        570,      # Dota 2
+        578080,   # PUBG: BATTLEGROUNDS
+        813780,   # Age of Empires II: Definitive Edition
+        431960,   # Wallpaper Engine
+        524220,   # NieR:Automata
+        359550,   # Tom Clancy's Rainbow Six Siege
+        646570,   # Slay the Spire
+        1151640,  # Horizon Zero Dawn
+        435150,   # Divinity: Original Sin 2
+        261550,   # Mount & Blade II: Bannerlord
+        1938090,  # Call of Duty: Modern Warfare III
+        1517290,  # Battlefield 2042
+        975370,   # Deep Rock Galactic
+        1145360,  # Hades
+        892970,   # Valheim
+        381210,   # Dead by Daylight
+        582010,   # Monster Hunter: World
+        1794680,  # Vampire Survivors
+        1237970,  # Titanfall 2
+        418370,   # Ori and the Blind Forest
+        1172620,  # Sea of Thieves
+        1466860,  # It Takes Two
+        444090,   # Payday 2
+        582010,   # Monster Hunter: World
+        1238840,  # Crusader Kings III
+        1273350,  # A Plague Tale: Innocence
+        1174180,  # Red Dead Redemption 2
+        1113560,  # NieR Replicant
+        1599340,  # Inscryption
+        1938090,  # Call of Duty: Modern Warfare III
+    ]
+    
+    all_deals = []
+    
+    # Check each popular game for deals
+    logger.info(f"Checking {len(popular_games)} popular games for deals...")
+    for app_id in popular_games:
+        try:
+            deal = await check_app_for_deal(app_id)
+            if deal:
+                all_deals.append(deal)
+        except Exception as e:
+            logger.debug(f"Error checking app {app_id}: {e}")
+            continue
+    
+    # Also check Steam featured deals
+    try:
+        featured_deals = await search_steam_featured_deals()
+        all_deals.extend(featured_deals)
+    except Exception as e:
+        logger.debug(f"Error fetching featured deals: {e}")
+    
+    # Remove duplicates
+    unique_deals = {}
+    for deal in all_deals:
+        app_id = deal['app_id']
+        if app_id not in unique_deals or deal['discount'] > unique_deals[app_id]['discount']:
+            unique_deals[app_id] = deal
+    
+    # Get all deals
+    all_unique_deals = list(unique_deals.values())
+    
+    # Create curated mix of 10 deals
+    final_deals = []
+    
+    # Sort by different criteria for variety
+    by_discount = sorted(all_unique_deals, key=lambda x: x['discount'], reverse=True)
+    by_popularity = [deal for deal in all_unique_deals if deal['app_id'] in popular_games[:20]]
+    old_games = [deal for deal in all_unique_deals if deal['app_id'] < 500000]  # Older games
+    huge_discounts = [deal for deal in all_unique_deals if deal['discount'] >= 50]
+    
+    # Mix: 3 popular, 2 old, 2 huge discounts, 3 highest discounts overall
+    added_app_ids = set()
+    
+    # 3 popular games with deals
+    for deal in by_popularity[:3]:
+        if deal['app_id'] not in added_app_ids:
+            final_deals.append(deal)
+            added_app_ids.add(deal['app_id'])
+    
+    # 2 old games with deals
+    for deal in old_games[:2]:
+        if deal['app_id'] not in added_app_ids and len(final_deals) < 10:
+            final_deals.append(deal)
+            added_app_ids.add(deal['app_id'])
+    
+    # 2 huge discounts (50%+)
+    for deal in huge_discounts[:2]:
+        if deal['app_id'] not in added_app_ids and len(final_deals) < 10:
+            final_deals.append(deal)
+            added_app_ids.add(deal['app_id'])
+    
+    # Fill remaining slots with highest discounts
+    for deal in by_discount:
+        if deal['app_id'] not in added_app_ids and len(final_deals) < 10:
+            final_deals.append(deal)
+            added_app_ids.add(deal['app_id'])
+    
+    logger.info(f"✅ Curated {len(final_deals)} deals for cache")
+    
+    # Save to cache
+    await save_deals_cache(final_deals)
+    
+    # Also cache popular games for instant price lookup
+    await cache_popular_games(popular_games)
+    
+    return final_deals
+
+async def cache_popular_games(popular_games: list):
+    """Cache popular games data for instant responses."""
+    try:
+        games_data = []
+        logger.info(f"Caching data for {len(popular_games)} popular games...")
+        
+        for app_id in popular_games:
+            try:
+                game_data = await get_steam_price(app_id)
+                if game_data and game_data.get('name'):
+                    price_overview = game_data.get('price_overview', {})
+                    games_data.append({
+                        'app_id': app_id,
+                        'name': game_data['name'],
+                        'current_price': price_overview.get('final', 0) / 100.0 if price_overview else 0,
+                        'original_price': price_overview.get('initial', 0) / 100.0 if price_overview else 0,
+                        'discount': price_overview.get('discount_percent', 0) if price_overview else 0,
+                        'currency': 'INR'
+                    })
+            except Exception as e:
+                logger.debug(f"Error caching game {app_id}: {e}")
+                continue
+        
+        # Save to cache file
+        with open(popular_games_cache["cache_file"], 'w') as f:
+            json.dump(games_data, f, indent=2)
+        
+        popular_games_cache["games"] = games_data
+        logger.info(f"Cached {len(games_data)} popular games")
+        
+    except Exception as e:
+        logger.error(f"Error caching popular games: {e}")
+
+async def get_cached_deals() -> list:
+    """Get the curated deals from cache."""
+    # Load cache if not already loaded
+    if not deals_cache["deals"]:
+        cache_data = await load_deals_cache()
+        deals_cache.update(cache_data)
+    
+    deals = deals_cache["deals"]
+    
+    if not deals:
+        logger.warning("No deals in cache, trying emergency fallback")
+        return await get_emergency_deals()
+    
+    logger.info(f"Returning {len(deals)} curated deals from cache")
+    return deals
+
 async def get_emergency_deals() -> list:
     """Emergency fast deals - hardcoded popular games to check quickly."""
     emergency_app_ids = [
@@ -1172,23 +1389,7 @@ async def get_emergency_deals() -> list:
             if deal:
                 logger.info(f"Emergency deal found: {deal['name']} - {deal['discount']}% off")
                 deals.append(deal)
-            else:
-                # Even if no discount, add the game with current price for emergency
-                try:
-                    game_data = await get_steam_price(app_id)
-                    if game_data and game_data.get('price_overview'):
-                        price_overview = game_data['price_overview']
-                        deals.append({
-                            'name': game_data.get('name', f'Game {app_id}'),
-                            'app_id': app_id,
-                            'discount': 0,
-                            'current_price': price_overview.get('final', 0) / 100.0,
-                            'original_price': price_overview.get('initial', price_overview.get('final', 0)) / 100.0,
-                            'currency': 'INR'
-                        })
-                        logger.info(f"Emergency game added (no discount): {game_data.get('name')}")
-                except:
-                    continue
+            # Skip games with no discount for now - we want real deals only
         except Exception as e:
             logger.debug(f"Error checking emergency app {app_id}: {e}")
             continue
@@ -1227,7 +1428,7 @@ async def get_todays_top_deals() -> list:
                     unique_deals[app_id] = deal
             
             # Filter for minimum discount (reduced threshold)
-            filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 20]
+            filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 10]
             
             # Sort by discount percentage (highest first)
             filtered_deals.sort(key=lambda x: x['discount'], reverse=True)
@@ -1250,7 +1451,7 @@ async def get_todays_top_deals() -> list:
                 unique_deals[app_id] = deal
         
         # Convert back to list and filter for minimum discount
-        filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 15]
+        filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 10]
         
         # Sort by discount percentage (highest first)
         filtered_deals.sort(key=lambda x: x['discount'], reverse=True)
@@ -1271,31 +1472,51 @@ async def search_steam_featured_deals() -> list:
         async with aiohttp.ClientSession() as session:
             # Steam's featured page often has deals
             featured_url = "https://store.steampowered.com/api/featured/"
+            logger.info("Searching Steam featured deals...")
+            
             async with session.get(featured_url) as response:
                 if response.status == 200:
                     data = await response.json()
+                    logger.info(f"Featured API response keys: {list(data.keys()) if data else 'None'}")
                     
                     # Check featured items for deals
                     if 'large_capsules' in data:
-                        for item in data['large_capsules'][:10]:  # Limit requests
+                        logger.info(f"Found {len(data['large_capsules'])} large capsules")
+                        for item in data['large_capsules'][:15]:  # Check more items
                             app_id = item.get('id')
                             if app_id:
                                 deal = await check_app_for_deal(app_id)
                                 if deal:
+                                    logger.info(f"Featured deal found: {deal['name']} - {deal['discount']}% off")
                                     deals.append(deal)
                     
                     # Check specials
                     if 'specials' in data:
-                        for item in data['specials'][:10]:
+                        logger.info(f"Found {len(data['specials'])} specials")
+                        for item in data['specials'][:15]:
+                            app_id = item.get('id')
+                            if app_id:
+                                deal = await check_app_for_deal(app_id)
+                                if deal:
+                                    logger.info(f"Special deal found: {deal['name']} - {deal['discount']}% off")
+                                    deals.append(deal)
+                                    
+                    # Check featured categories if available
+                    if 'featured_win' in data:
+                        featured_win = data['featured_win']
+                        for item in featured_win[:10]:
                             app_id = item.get('id')
                             if app_id:
                                 deal = await check_app_for_deal(app_id)
                                 if deal:
                                     deals.append(deal)
+                else:
+                    logger.warning(f"Featured deals API returned {response.status}")
                                     
     except Exception as e:
-        logger.debug(f"Error searching featured deals: {e}")
+        logger.error(f"Error searching featured deals: {e}")
     
+    logger.info(f"Featured deals found: {len(deals)}")
     return deals
 
 async def search_category_deals(category: str) -> list:
@@ -1319,34 +1540,75 @@ async def search_category_deals(category: str) -> list:
     return deals
 
 async def search_steam_specials() -> list:
-    """Search Steam's special offers."""
+    """Search Steam's special offers using better targeting."""
     deals = []
     try:
-        # Check some random popular app IDs that often have sales
+        logger.info("Searching Steam specials...")
         import random
         
-        # Generate some random app IDs in common ranges
-        random_ranges = [
-            range(200000, 300000),    # Older popular games
-            range(400000, 500000),    # Mid-era games  
-            range(1000000, 1200000),  # Newer games
+        # Use popular games that frequently go on sale
+        popular_sale_games = [
+            # Popular AAA games that often have sales
+            271590,   # GTA V
+            292030,   # The Witcher 3
+            377160,   # Fallout 4
+            1174180,  # Red Dead Redemption 2
+            489830,   # The Elder Scrolls V: Skyrim Special Edition
+            1091500,  # Cyberpunk 2077
+            1245620,  # ELDEN RING
+            1086940,  # Baldur's Gate 3
+            
+            # Popular indie games that go on sale
+            413150,   # Stardew Valley
+            594650,   # Hunt: Showdown
+            252490,   # Rust
+            322330,   # Don't Starve Together
+            394360,   # Hearts of Iron IV
+            236850,   # Europa Universalis IV
+            
+            # Popular multiplayer games
+            730,      # Counter-Strike 2
+            570,      # Dota 2
+            578080,   # PUBG: BATTLEGROUNDS
+            813780,   # Age of Empires II: Definitive Edition
         ]
         
-        sample_app_ids = []
-        for r in random_ranges:
-            sample_app_ids.extend(random.sample(r, 5))  # 5 from each range
-        
-        for app_id in sample_app_ids:
+        # Check these known popular games first
+        for app_id in popular_sale_games[:20]:  # Limit to avoid timeout
             try:
                 deal = await check_app_for_deal(app_id)
                 if deal:
+                    logger.info(f"Popular game deal: {deal['name']} - {deal['discount']}% off")
                     deals.append(deal)
             except:
-                continue  # Skip failed requests
+                continue
+        
+        # Also check some random ranges, but smarter ones
+        if len(deals) < 5:  # Only if we need more deals
+            random_ranges = [
+                range(300000, 400000),    # 2016-2017 games
+                range(800000, 900000),    # 2019-2020 games  
+                range(1200000, 1300000),  # 2021-2022 games
+            ]
+            
+            sample_app_ids = []
+            for r in random_ranges:
+                sample_app_ids.extend(random.sample(list(r), 8))  # 8 from each range
+            
+            for app_id in sample_app_ids:
+                try:
+                    deal = await check_app_for_deal(app_id)
+                    if deal:
+                        deals.append(deal)
+                        if len(deals) >= 15:  # Stop when we have enough
+                            break
+                except:
+                    continue
                 
     except Exception as e:
-        logger.debug(f"Error searching specials: {e}")
+        logger.error(f"Error searching specials: {e}")
     
+    logger.info(f"Specials found: {len(deals)}")
     return deals
 
 async def check_app_for_deal(app_id: int) -> dict | None:
@@ -1360,8 +1622,8 @@ async def check_app_for_deal(app_id: int) -> dict | None:
             if price_overview:
                 discount = price_overview.get('discount_percent', 0)
                 
-                # Only return if discount is significant (30% or more)
-                if discount >= 30:
+                # Only return if discount is significant (10% or more)
+                if discount >= 10:
                     current_price = price_overview.get('final', 0) / 100.0
                     original_price = price_overview.get('initial', 0) / 100.0
                     
@@ -1514,7 +1776,7 @@ async def is_game_popular(game_data: dict, app_id: int) -> bool:
         logger.debug(f"Error checking popularity for {app_id}: {e}")
         return True  # Default to popular if we can't determine
 
-async def send_deals_email(email: str, deals: list, is_immediate: bool = False, genre: str = "Any", age_preference: str = "any") -> bool:
+async def send_deals_email(email: str, deals: list, is_immediate: bool = False) -> bool:
     """Send deals email using Resend API."""
     try:
         import aiohttp
@@ -1523,20 +1785,10 @@ async def send_deals_email(email: str, deals: list, is_immediate: bool = False, 
             return False
         
         # Create email content
-        age_text = {
-            "old": "Classic & Retro",
-            "middle": "Modern",
-            "recent": "Latest",
-            "any": "All Time"
-        }
-        
         if is_immediate:
-            if genre == "Any":
-                subject = f"🔥 TOP STEAM DEALS ({age_text[age_preference]}) - Up to {deals[0]['discount']}% OFF!"
-                greeting = f"Here are today's hottest {age_text[age_preference].lower()} Steam deals with the biggest discounts!"
-            else:
-                subject = f"🔥 TOP {genre.upper()} DEALS ({age_text[age_preference]}) - Up to {deals[0]['discount']}% OFF!"
-                greeting = f"Here are today's hottest {genre} deals from {age_text[age_preference].lower()} games!"
+            max_discount = max(deal['discount'] for deal in deals) if deals else 0
+            subject = f"🔥 TOP STEAM DEALS TODAY - Up to {max_discount}% OFF!"
+            greeting = "Here are today's hottest curated Steam deals with the biggest discounts!"
         else:
             subject = "🎮 Daily Steam Deals - Your Gaming Bargains"
             greeting = "Here are today's best Steam deals!"
@@ -1634,6 +1886,39 @@ async def send_deals_email(email: str, deals: list, is_immediate: bool = False, 
 async def initialize_services():
     """Initialize all services on startup."""
     logger.info("Initializing services...")
+    
+    # Initialize deals cache first (most important for performance)
+    try:
+        logger.info("🔍 Initializing deals cache...")
+        
+        # Load existing cache
+        cache_data = await load_deals_cache()
+        deals_cache.update(cache_data)
+        
+        # Check if cache is recent (less than 6 hours old)
+        cache_age_limit = 6 * 60 * 60  # 6 hours in seconds
+        cache_is_fresh = False
+        
+        if deals_cache["last_updated"]:
+            try:
+                last_updated = datetime.fromisoformat(deals_cache["last_updated"])
+                age = (datetime.now() - last_updated).total_seconds()
+                cache_is_fresh = age < cache_age_limit
+                logger.info(f"Cache age: {age/3600:.1f} hours")
+            except:
+                pass
+        
+        if not cache_is_fresh or not deals_cache["deals"]:
+            logger.info("Cache is stale or empty, fetching fresh deals...")
+            # Fetch deals in background to avoid blocking startup
+            asyncio.create_task(fetch_and_cache_deals())
+        else:
+            logger.info(f"✅ Using cached deals: {len(deals_cache['deals'])} deals available")
+            
+    except Exception as e:
+        logger.error(f"Cache initialization failed: {e}")
+        # Start background fetch as fallback
+        asyncio.create_task(fetch_and_cache_deals())
     
     # Try to initialize database, but don't fail if it doesn't work
     try:
