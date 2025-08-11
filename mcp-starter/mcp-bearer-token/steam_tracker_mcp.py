@@ -421,6 +421,34 @@ AddPriceAlertDescription = RichToolDescription(
 )
 
 # MCP Tools
+@mcp.tool(description="Get information about this Steam Price Tracker MCP server")
+async def about() -> dict[str, str]:
+    """Get detailed information about this MCP server."""
+    from textwrap import dedent
+    
+    server_name = "Steam Price Tracker MCP"
+    server_description = dedent("""
+        This MCP server is designed to help users track Steam game prices and discover deals.
+        It provides comprehensive tools to search Steam games, set up price alerts with email
+        notifications, get instant top deals, and subscribe to daily deal updates.
+        
+        Key Features:
+        • Steam Game Search - Find games with current prices and App IDs
+        • Price Alerts - Get notified when games drop below target prices  
+        • Top Deals Email - Instant email with today's hottest Steam deals
+        • Daily Deals - Subscribe to daily deal notifications at 10:30 PM
+        • Multi-user Support - Full database support for multiple users
+        
+        The server integrates with Steam's official APIs for accurate pricing data
+        and uses Resend API for reliable email notifications. All price data is
+        in Indian Rupees (INR) and includes discount percentages and savings calculations.
+    """)
+
+    return {
+        "name": server_name,
+        "description": server_description.strip()
+    }
+
 @mcp.tool(description=RegisterUserDescription.model_dump_json())
 async def register_user(
     email: Annotated[str, Field(description="User's email address for notifications")]
@@ -902,15 +930,23 @@ async def send_deals_email(email: str, deals: list, is_immediate: bool = False) 
         
         for i, deal in enumerate(deals, 1):
             savings = deal['original_price'] - deal['current_price']
+            steam_url = f"https://store.steampowered.com/app/{deal['app_id']}"
             html_content += f"""
                 <div style="background: white; margin: 10px 0; padding: 15px; border-radius: 5px; border-left: 4px solid #4CAF50;">
-                    <h3 style="margin: 0 0 10px 0; color: #1b2838;">{i}. {deal['name']}</h3>
+                    <h3 style="margin: 0 0 10px 0; color: #1b2838;">
+                        <a href="{steam_url}" style="color: #1b2838; text-decoration: none;">{i}. {deal['name']}</a>
+                    </h3>
                     <p style="margin: 5px 0; font-size: 18px;">
                         <span style="color: #4CAF50; font-weight: bold;">₹{deal['current_price']:.2f}</span>
                         <span style="text-decoration: line-through; color: #666; margin-left: 10px;">₹{deal['original_price']:.2f}</span>
                         <span style="background: #ff6b35; color: white; padding: 2px 8px; border-radius: 3px; margin-left: 10px; font-size: 14px;">-{deal['discount']}%</span>
                     </p>
                     <p style="margin: 5px 0; color: #4CAF50;">💰 You save: ₹{savings:.2f}</p>
+                    <p style="margin: 5px 0;">
+                        <a href="{steam_url}" style="background: #1b2838; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px; display: inline-block; font-size: 14px;">
+                            🛒 View on Steam
+                        </a>
+                    </p>
                     <p style="margin: 5px 0; font-size: 12px; color: #666;">App ID: {deal['app_id']}</p>
                 </div>
             """
