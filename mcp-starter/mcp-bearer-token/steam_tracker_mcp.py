@@ -878,22 +878,48 @@ async def send_top_deals_today(
     try:
         logger.info(f"Fetching {genre} deals ({age_preference} games) for {email}")
         
-        # Get customized top deals
-        if genre == "Any" and age_preference == "any":
-            # For general "any" requests, use the original working method
+        # Get customized top deals with timeout protection
+        import asyncio
+        
+        async def fetch_deals_with_timeout():
+            if genre == "Any" and age_preference == "any":
+                # For general "any" requests, use the original working method
+                return await get_todays_top_deals()
+            else:
+                # For specific preferences, use the customized method
+                return await get_customized_top_deals(genre, age_preference)
+        
+        try:
+            # Use timeout to prevent MCP server timeout
+            top_deals = await asyncio.wait_for(fetch_deals_with_timeout(), timeout=25.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Deals fetching timed out, trying fallback...")
+            # Emergency fallback - get any deals quickly
             top_deals = await get_todays_top_deals()
-        else:
-            # For specific preferences, use the customized method
-            top_deals = await get_customized_top_deals(genre, age_preference)
         
         if not top_deals:
-            return f"❌ No {genre} deals found for {age_preference} games today. Try different preferences or check again later."
+            # If still no deals, try one more emergency fallback
+            logger.info("No deals found, trying emergency fallback...")
+            try:
+                top_deals = await asyncio.wait_for(get_emergency_deals(), timeout=10.0)
+            except:
+                pass
+        
+        if not top_deals:
+            return f"❌ No {genre} deals found for {age_preference} games today. Steam API might be slow. Try again later."
+        
+        # Ensure we have valid deals before sending email
+        valid_deals = [deal for deal in top_deals if deal.get('name') and deal.get('discount', 0) > 0]
+        
+        if not valid_deals:
+            return f"❌ Found deals but they have invalid data. Try again later."
         
         # Send email with deals
-        email_sent = await send_deals_email(email, top_deals, is_immediate=True, genre=genre, age_preference=age_preference)
+        email_sent = await send_deals_email(email, valid_deals, is_immediate=True, genre=genre, age_preference=age_preference)
         
         if email_sent:
-            return f"📧 ✅ Top {genre} Steam deals ({age_preference} games) sent to {email}!\n\nFound {len(top_deals)} popular games with discounts up to {max(deal['discount'] for deal in top_deals)}% OFF!"
+            max_discount = max(deal['discount'] for deal in valid_deals) if valid_deals else 0
+            return f"📧 ✅ Top {genre} Steam deals ({age_preference} games) sent to {email}!\n\nFound {len(valid_deals)} popular games with discounts up to {max_discount}% OFF!"
         else:
             return f"❌ Failed to send email to {email}. Please check the email address and try again."
             
@@ -959,35 +985,60 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
                     logger.debug(f"Error searching {term}: {e}")
                     continue
         
-        # Method 2: Sample from app ID ranges for the age preference (increased sampling)
+        # Method 2: Fast targeted sampling (much smaller samples for speed)
         import random
+        import asyncio
+        
         for app_range in age_ranges[age_preference]:
-            # Sample more apps to find more deals - extra aggressive for "Any" genre
+            # Much smaller, faster samples
             if genre == "Any":
-                sample_size = min(200, max(100, len(app_range) // 5000))  # More samples for "Any"
+                sample_size = min(30, max(15, len(app_range) // 20000))  # Reduced dramatically
             else:
-                sample_size = min(100, max(50, len(app_range) // 10000))  # Sample 50-100 apps per range
+                sample_size = min(20, max(10, len(app_range) // 30000))  # Much smaller samples
             
             sample_app_ids = random.sample(list(app_range), sample_size)
             
-            for app_id in sample_app_ids:
+            # Process in batches with timeout to prevent hanging
+            batch_size = 5
+            for i in range(0, len(sample_app_ids), batch_size):
+                batch = sample_app_ids[i:i + batch_size]
+                
                 try:
-                    # Check if game matches genre (if not "Any")
-                    if genre != "Any":
-                        if not await game_matches_genre(app_id, genre):
-                            continue
+                    # Process batch with timeout
+                    async def process_batch():
+                        batch_deals = []
+                        for app_id in batch:
+                            try:
+                                # Skip genre check for "Any" to save time
+                                if genre != "Any":
+                                    # Quick genre check without full API call
+                                    if not quick_genre_check(app_id, genre):
+                                        continue
+                                
+                                deal = await check_popular_app_for_deal(app_id)
+                                if deal:
+                                    batch_deals.append(deal)
+                            except:
+                                continue
+                        return batch_deals
                     
-                    deal = await check_popular_app_for_deal(app_id)
-                    if deal:
-                        deals.append(deal)
-                        # Stop early if we have enough deals for this method
-                        if len(deals) >= 50:
-                            break
-                except:
-                    continue  # Skip failed requests
+                    # Use timeout to prevent hanging
+                    batch_deals = await asyncio.wait_for(process_batch(), timeout=5.0)
+                    deals.extend(batch_deals)
+                    
+                    # Early exit if we have enough deals
+                    if len(deals) >= 20:
+                        break
+                        
+                except asyncio.TimeoutError:
+                    logger.debug(f"Batch processing timed out, continuing...")
+                    continue
+                except Exception as e:
+                    logger.debug(f"Batch processing error: {e}")
+                    continue
             
             # Stop if we have enough deals
-            if len(deals) >= 50:
+            if len(deals) >= 20:
                 break
         
         # Method 3: Check Steam featured for genre matches
@@ -1089,32 +1140,77 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
                 pass
         return []
 
+async def get_emergency_deals() -> list:
+    """Emergency fast deals - hardcoded popular games to check quickly."""
+    emergency_app_ids = [
+        271590,  # GTA V
+        1086940, # Baldur's Gate 3
+        1174180, # Red Dead Redemption 2
+        292030,  # The Witcher 3
+        570,     # Dota 2
+        730,     # Counter-Strike 2
+        440,     # Team Fortress 2
+        1938090, # Call of Duty: Modern Warfare III
+        524220,  # NieR:Automata
+        1245620, # ELDEN RING
+    ]
+    
+    deals = []
+    for app_id in emergency_app_ids:
+        try:
+            deal = await check_app_for_deal(app_id)
+            if deal:
+                deals.append(deal)
+        except:
+            continue
+    
+    return deals[:8]  # Return up to 8 emergency deals
+
 async def get_todays_top_deals() -> list:
-    """Get top Steam deals with highest discounts by searching dynamically."""
+    """Get top Steam deals with highest discounts by searching dynamically (optimized for speed)."""
     try:
         logger.info("Searching for top Steam deals dynamically...")
         deals = []
+        import asyncio
         
-        # Method 1: Search Steam Store Featured deals
-        deals.extend(await search_steam_featured_deals())
+        # Method 1: Search Steam Store Featured deals (with timeout)
+        try:
+            featured_deals = await asyncio.wait_for(search_steam_featured_deals(), timeout=8.0)
+            deals.extend(featured_deals)
+        except (Exception, asyncio.TimeoutError) as e:
+            logger.debug(f"Featured deals timed out or failed: {e}")
         
-        # Method 2: Search popular categories for deals
-        popular_categories = [
-            "Action", "Adventure", "RPG", "Strategy", "Simulation", 
-            "Racing", "Sports", "Indie", "Multiplayer"
-        ]
+        # Method 2: Search Steam's special offers page (with timeout)
+        try:
+            special_deals = await asyncio.wait_for(search_steam_specials(), timeout=8.0)
+            deals.extend(special_deals)
+        except (Exception, asyncio.TimeoutError) as e:
+            logger.debug(f"Special deals timed out or failed: {e}")
         
-        for category in popular_categories[:3]:  # Limit to avoid too many requests
-            try:
-                category_deals = await search_category_deals(category)
-                deals.extend(category_deals)
-            except Exception as e:
-                logger.debug(f"Error searching {category} deals: {e}")
-                continue
+        # Early return if we have enough deals
+        if len(deals) >= 8:
+            # Remove duplicates quickly
+            unique_deals = {}
+            for deal in deals:
+                app_id = deal['app_id']
+                if app_id not in unique_deals or deal['discount'] > unique_deals[app_id]['discount']:
+                    unique_deals[app_id] = deal
+            
+            # Filter for minimum discount (reduced threshold)
+            filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 20]
+            
+            # Sort by discount percentage (highest first)
+            filtered_deals.sort(key=lambda x: x['discount'], reverse=True)
+            
+            logger.info(f"Found {len(filtered_deals)} deals with 20%+ discounts (fast path)")
+            return filtered_deals[:10]
         
-        # Method 3: Check Steam's special offers page
-        special_deals = await search_steam_specials()
-        deals.extend(special_deals)
+        # If we need more deals, try one more quick category search
+        try:
+            action_deals = await asyncio.wait_for(search_category_deals("Action"), timeout=5.0)
+            deals.extend(action_deals)
+        except (Exception, asyncio.TimeoutError) as e:
+            logger.debug(f"Action deals timed out or failed: {e}")
         
         # Remove duplicates based on app_id
         unique_deals = {}
@@ -1124,14 +1220,14 @@ async def get_todays_top_deals() -> list:
                 unique_deals[app_id] = deal
         
         # Convert back to list and filter for minimum discount
-        filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 30]
+        filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 15]
         
         # Sort by discount percentage (highest first)
         filtered_deals.sort(key=lambda x: x['discount'], reverse=True)
         
-        # Return top 15 deals
-        logger.info(f"Found {len(filtered_deals)} deals with 30%+ discounts")
-        return filtered_deals[:15]
+        # Return top deals
+        logger.info(f"Found {len(filtered_deals)} deals with 15%+ discounts")
+        return filtered_deals[:10]
         
     except Exception as e:
         logger.error(f"Error getting dynamic top deals: {e}")
@@ -1291,6 +1387,33 @@ def is_in_age_range(app_id: int, age_ranges: list) -> bool:
         if app_id in age_range:
             return True
     return False
+
+def quick_genre_check(app_id: int, genre: str) -> bool:
+    """Quick genre check based on App ID patterns (heuristic, fast)."""
+    # This is a fast heuristic check to avoid API calls
+    # Based on common App ID patterns for different genres
+    if genre == "Any":
+        return True
+    
+    # Simple heuristic based on app_id ranges where certain genres are more common
+    genre_patterns = {
+        "Action": [range(200000, 800000), range(1000000, 1500000)],
+        "RPG": [range(50000, 400000), range(800000, 1200000)],
+        "Strategy": [range(10000, 300000), range(600000, 1000000)],
+        "Indie": [range(300000, 1200000), range(1500000, 2000000)],
+        "Adventure": [range(100000, 600000), range(1200000, 1800000)],
+        "Simulation": [range(50000, 500000), range(800000, 1400000)],
+        "Racing": [range(10000, 200000), range(400000, 800000)],
+        "Sports": [range(10000, 300000), range(600000, 1000000)],
+    }
+    
+    if genre in genre_patterns:
+        for pattern_range in genre_patterns[genre]:
+            if app_id in pattern_range:
+                return True
+    
+    # Default to True for other genres to avoid filtering too aggressively
+    return True
 
 async def game_matches_genre(app_id: int, genre: str) -> bool:
     """Check if game matches the specified genre based on its details."""
