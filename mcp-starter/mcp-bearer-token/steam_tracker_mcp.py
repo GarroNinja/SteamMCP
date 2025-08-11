@@ -553,6 +553,61 @@ async def register_user(
         except Exception as e:
             raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Error registering user: {str(e)}"))
 
+@mcp.tool(description="Quick search in cached popular games for instant price response")
+async def quick_game_price(
+    query: Annotated[str, Field(description="Game name to search for in popular games cache (e.g., 'GTA', 'Witcher', 'Cyberpunk')")]
+) -> str:
+    """Search cached popular games for instant price response."""
+    try:
+        # Load popular games cache if not loaded
+        if not popular_games_cache["games"]:
+            try:
+                if os.path.exists(popular_games_cache["cache_file"]):
+                    with open(popular_games_cache["cache_file"], 'r') as f:
+                        popular_games_cache["games"] = json.load(f)
+            except:
+                pass
+        
+        games = popular_games_cache["games"]
+        if not games:
+            return "❌ Popular games cache not available. Try refreshing the cache."
+        
+        # Search in cached games
+        query_lower = query.lower()
+        matches = []
+        
+        for game in games:
+            if query_lower in game['name'].lower():
+                matches.append(game)
+        
+        if not matches:
+            return f"🔍 No matches found in popular games cache for '{query}'. Try using the full search_steam_games tool."
+        
+        # Format results
+        result = f"🎮 **POPULAR GAMES PRICE CHECK FOR '{query.upper()}'**\n\n"
+        
+        for i, game in enumerate(matches[:5], 1):  # Show top 5 matches
+            if game['discount'] > 0:
+                result += f"{i}. **{game['name']}** 🔥\n"
+                result += f"   💰 Price: ₹{game['current_price']:.2f} (was ₹{game['original_price']:.2f}) -{game['discount']}% OFF\n"
+                result += f"   🆔 App ID: {game['app_id']}\n\n"
+            else:
+                result += f"{i}. **{game['name']}**\n"
+                result += f"   💰 Price: ₹{game['current_price']:.2f}\n"
+                result += f"   🆔 App ID: {game['app_id']}\n\n"
+        
+        if len(matches) > 5:
+            result += f"... and {len(matches) - 5} more matches\n\n"
+        
+        result += "💡 **FOR PRICE TRACKING:**\n"
+        result += "Use `setup_price_alert_by_appid(app_id=XXXXX, email=\"your@email.com\", target_price=XXX)`"
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in quick game price search: {e}")
+        return f"❌ Error searching games: {str(e)}"
+
 @mcp.tool(description="Search Steam games and display all matching games with their current prices and App IDs. Shows complete information without requiring selection.")
 async def search_steam_games(
     query: Annotated[str, Field(description="Game name to search for (e.g., 'PEAK', 'Cyberpunk 2077')")]
@@ -935,8 +990,12 @@ async def send_top_deals_today(
         logger.error(f"Error sending top deals: {e}")
         return f"❌ Error getting top deals: {str(e)}"
 
+# =============================================================================
+# DEPRECATED FUNCTIONS - NO LONGER USED (kept for reference)
+# =============================================================================
+
 async def get_customized_top_deals_DEPRECATED(genre: str, age_preference: str) -> list:
-    """Get customized Steam deals based on genre and age preferences, filtering for popular games."""
+    """DEPRECATED - Get customized Steam deals based on genre and age preferences, filtering for popular games."""
     try:
         logger.info(f"Searching for {genre} deals in {age_preference} games...")
         deals = []
@@ -1182,7 +1241,19 @@ async def save_deals_cache(deals: list):
         logger.error(f"Error saving cache: {e}")
 
 async def fetch_and_cache_deals():
-    """Fetch curated deals from Steam and cache them."""
+    """
+    Fetch curated deals from Steam and cache them.
+    
+    NEW SIMPLIFIED SYSTEM:
+    - Checks 45+ popular games that frequently have deals
+    - Creates curated mix of exactly 10 deals:
+      * 3 popular games with deals
+      * 2 old games with deals (App ID < 500k)
+      * 2 huge discounts (50%+ off)
+      * 3 highest discounts overall
+    - Caches for 6 hours for instant responses
+    - No more genre/age filtering complexity
+    """
     logger.info("🔍 Fetching curated Steam deals...")
     
     # Curated list of popular games that frequently have good deals
