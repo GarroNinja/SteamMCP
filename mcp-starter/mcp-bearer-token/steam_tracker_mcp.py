@@ -383,22 +383,7 @@ mcp = FastMCP(
     auth=SimpleBearerAuthProvider(TOKEN),
 )
 
-# Add health check endpoint for Render
-@mcp.app.get("/")
-async def health_check():
-    """Health check endpoint for Render and other services."""
-    return {
-        "status": "healthy",
-        "service": "Steam Price Tracker MCP Server",
-        "mcp_endpoint": "/mcp/",
-        "version": "1.0.0",
-        "description": "MCP server for Steam game price tracking and alerts"
-    }
-
-@mcp.app.get("/health")
-async def health():
-    """Alternative health check endpoint."""
-    return {"status": "ok", "service": "Steam Price Tracker MCP"}
+# No custom health check endpoints needed - FastMCP handles this automatically
 
 # Required validate tool for Puch compatibility
 @mcp.tool
