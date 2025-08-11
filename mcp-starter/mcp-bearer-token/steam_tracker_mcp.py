@@ -811,35 +811,158 @@ async def subscribe_daily_deals(
             logger.error(f"Error subscribing to daily deals: {e}")
             return f"❌ Error subscribing to daily deals: {str(e)}"
 
-@mcp.tool(description="Get today's top Steam deals with highest discounts and send them via email immediately")
+@mcp.tool(description="Get customized Steam deals with highest discounts based on genre and game age preferences, filtered for popular games")
 async def send_top_deals_today(
-    email: Annotated[str, Field(description="Email address to send the deals to")]
+    email: Annotated[str, Field(description="Email address to send the deals to")],
+    genre: Annotated[str, Field(description="Preferred genre: Action, Adventure, RPG, Strategy, Simulation, Racing, Sports, Indie, Multiplayer, Puzzle, Horror, Fighting, or 'Any' for all genres")] = "Any",
+    age_preference: Annotated[str, Field(description="Game age preference: 'old' (2010-2015), 'middle' (2016-2020), 'recent' (2021+), or 'any' for all ages")] = "any"
 ) -> str:
-    """Get today's top Steam deals and send them via email immediately."""
+    """Get customized Steam deals based on user preferences and send via email immediately."""
     # Validate email
     if not email or "@" not in email:
-        return "❌ Valid email address is required. Please use: send_top_deals_today(email=\"your@email.com\")"
+        return "❌ Valid email address is required. Please use: send_top_deals_today(email=\"your@email.com\", genre=\"Action\", age_preference=\"recent\")"
+    
+    # Validate inputs
+    valid_genres = ["Action", "Adventure", "RPG", "Strategy", "Simulation", "Racing", "Sports", "Indie", "Multiplayer", "Puzzle", "Horror", "Fighting", "Any"]
+    valid_ages = ["old", "middle", "recent", "any"]
+    
+    if genre not in valid_genres:
+        return f"❌ Invalid genre. Choose from: {', '.join(valid_genres)}"
+    
+    if age_preference not in valid_ages:
+        return f"❌ Invalid age preference. Choose from: {', '.join(valid_ages)}"
     
     try:
-        logger.info(f"Fetching top deals for {email}")
+        logger.info(f"Fetching {genre} deals ({age_preference} games) for {email}")
         
-        # Get top deals from Steam (games with high discounts)
-        top_deals = await get_todays_top_deals()
+        # Get customized top deals
+        top_deals = await get_customized_top_deals(genre, age_preference)
         
         if not top_deals:
-            return "❌ No deals found today. Please try again later."
+            return f"❌ No {genre} deals found for {age_preference} games today. Try different preferences or check again later."
         
         # Send email with deals
-        email_sent = await send_deals_email(email, top_deals, is_immediate=True)
+        email_sent = await send_deals_email(email, top_deals, is_immediate=True, genre=genre, age_preference=age_preference)
         
         if email_sent:
-            return f"📧 ✅ Top Steam deals sent to {email}!\n\nFound {len(top_deals)} amazing deals with discounts up to 90% OFF!"
+            return f"📧 ✅ Top {genre} Steam deals ({age_preference} games) sent to {email}!\n\nFound {len(top_deals)} popular games with discounts up to {max(deal['discount'] for deal in top_deals)}% OFF!"
         else:
             return f"❌ Failed to send email to {email}. Please check the email address and try again."
             
     except Exception as e:
-        logger.error(f"Error sending top deals: {e}")
+        logger.error(f"Error sending customized top deals: {e}")
         return f"❌ Error getting top deals: {str(e)}"
+
+async def get_customized_top_deals(genre: str, age_preference: str) -> list:
+    """Get customized Steam deals based on genre and age preferences, filtering for popular games."""
+    try:
+        logger.info(f"Searching for {genre} deals in {age_preference} games...")
+        deals = []
+        
+        # Define App ID ranges based on age preferences
+        age_ranges = {
+            "old": [
+                range(10, 50000),        # Very old Steam games (2003-2010)
+                range(50000, 200000),    # Classic games (2010-2015)
+            ],
+            "middle": [
+                range(200000, 600000),   # Mid-era games (2015-2019)
+                range(600000, 1000000),  # Late middle games (2019-2020)
+            ],
+            "recent": [
+                range(1000000, 1500000), # Recent games (2020-2022)
+                range(1500000, 2000000), # Very recent games (2022+)
+            ],
+            "any": [
+                range(10, 500000),       # Mix of old and middle
+                range(500000, 2000000),  # Mix of middle and recent
+            ]
+        }
+        
+        # Get genre-specific search terms
+        genre_terms = {
+            "Action": ["action", "shooter", "combat", "fighting"],
+            "Adventure": ["adventure", "story", "narrative", "exploration"],
+            "RPG": ["rpg", "role playing", "fantasy", "character"],
+            "Strategy": ["strategy", "tactical", "management", "civilization"],
+            "Simulation": ["simulation", "simulator", "farming", "city"],
+            "Racing": ["racing", "driving", "car", "formula"],
+            "Sports": ["sports", "football", "soccer", "basketball"],
+            "Indie": ["indie", "independent", "pixel", "retro"],
+            "Multiplayer": ["multiplayer", "online", "coop", "pvp"],
+            "Puzzle": ["puzzle", "logic", "brain", "match"],
+            "Horror": ["horror", "survival", "zombie", "scary"],
+            "Fighting": ["fighting", "martial", "combat", "tekken"],
+            "Any": ["popular", "best", "top", "award"]
+        }
+        
+        # Method 1: Genre-based search
+        if genre in genre_terms:
+            for term in genre_terms[genre][:2]:  # Limit search terms
+                try:
+                    search_results = await find_steam_game(term)
+                    for game in search_results[:20]:  # Check more games per search
+                        app_id = game.get('appid')
+                        if app_id and is_in_age_range(app_id, age_ranges[age_preference]):
+                            deal = await check_popular_app_for_deal(app_id)
+                            if deal:
+                                deals.append(deal)
+                except Exception as e:
+                    logger.debug(f"Error searching {term}: {e}")
+                    continue
+        
+        # Method 2: Sample from app ID ranges for the age preference
+        import random
+        for app_range in age_ranges[age_preference]:
+            sample_size = min(25, len(app_range))  # Sample 25 apps per range
+            sample_app_ids = random.sample(app_range, sample_size)
+            
+            for app_id in sample_app_ids:
+                try:
+                    # Check if game matches genre (if not "Any")
+                    if genre != "Any":
+                        if not await game_matches_genre(app_id, genre):
+                            continue
+                    
+                    deal = await check_popular_app_for_deal(app_id)
+                    if deal:
+                        deals.append(deal)
+                except:
+                    continue  # Skip failed requests
+        
+        # Method 3: Check Steam featured for genre matches
+        try:
+            featured_deals = await search_steam_featured_deals()
+            for deal in featured_deals:
+                app_id = deal['app_id']
+                if is_in_age_range(app_id, age_ranges[age_preference]):
+                    if genre == "Any" or await game_matches_genre(app_id, genre):
+                        deals.append(deal)
+        except Exception as e:
+            logger.debug(f"Error checking featured deals: {e}")
+        
+        # Remove duplicates and filter for popular games
+        unique_deals = {}
+        for deal in deals:
+            app_id = deal['app_id']
+            if app_id not in unique_deals or deal['discount'] > unique_deals[app_id]['discount']:
+                unique_deals[app_id] = deal
+        
+        # Filter for games with good popularity metrics and minimum discount
+        popular_deals = [
+            deal for deal in unique_deals.values() 
+            if deal['discount'] >= 25 and deal.get('is_popular', True)
+        ]
+        
+        # Sort by discount percentage (highest first)
+        popular_deals.sort(key=lambda x: x['discount'], reverse=True)
+        
+        logger.info(f"Found {len(popular_deals)} popular {genre} deals for {age_preference} games")
+        return popular_deals[:12]  # Return top 12 deals
+        
+    except Exception as e:
+        logger.error(f"Error getting customized deals: {e}")
+        return []
 
 async def get_todays_top_deals() -> list:
     """Get top Steam deals with highest discounts by searching dynamically."""
@@ -1004,7 +1127,116 @@ async def check_app_for_deal(app_id: int) -> dict | None:
     
     return None
 
-async def send_deals_email(email: str, deals: list, is_immediate: bool = False) -> bool:
+async def check_popular_app_for_deal(app_id: int) -> dict | None:
+    """Check if a specific app has a good deal and is popular."""
+    try:
+        game_data = await get_steam_price(app_id)
+        if game_data:
+            price_overview = game_data.get('price_overview')
+            name = game_data.get('name', f'Game {app_id}')
+            
+            # Check for popularity indicators
+            is_popular = await is_game_popular(game_data, app_id)
+            
+            if price_overview and is_popular:
+                discount = price_overview.get('discount_percent', 0)
+                
+                # Only return if discount is significant (25% or more for popular games)
+                if discount >= 25:
+                    current_price = price_overview.get('final', 0) / 100.0
+                    original_price = price_overview.get('initial', 0) / 100.0
+                    
+                    return {
+                        'name': name,
+                        'app_id': app_id,
+                        'discount': discount,
+                        'current_price': current_price,
+                        'original_price': original_price,
+                        'currency': 'INR',
+                        'is_popular': True
+                    }
+    except Exception as e:
+        logger.debug(f"Error checking popular app {app_id}: {e}")
+    
+    return None
+
+def is_in_age_range(app_id: int, age_ranges: list) -> bool:
+    """Check if app_id falls within the specified age ranges."""
+    for age_range in age_ranges:
+        if app_id in age_range:
+            return True
+    return False
+
+async def game_matches_genre(app_id: int, genre: str) -> bool:
+    """Check if game matches the specified genre based on its details."""
+    try:
+        game_data = await get_steam_price(app_id)
+        if game_data:
+            # Check game name and description for genre keywords
+            name = game_data.get('name', '').lower()
+            short_description = game_data.get('short_description', '').lower()
+            
+            genre_keywords = {
+                "Action": ["action", "shooter", "combat", "fighting", "fps", "beat", "battle"],
+                "Adventure": ["adventure", "story", "narrative", "quest", "journey"],
+                "RPG": ["rpg", "role", "fantasy", "magic", "character", "level", "dungeon"],
+                "Strategy": ["strategy", "tactical", "rts", "civilization", "empire", "war"],
+                "Simulation": ["simulation", "simulator", "farming", "city", "building", "management"],
+                "Racing": ["racing", "driving", "car", "speed", "formula", "rally"],
+                "Sports": ["sports", "football", "soccer", "basketball", "baseball", "tennis"],
+                "Indie": ["indie", "independent", "pixel", "retro", "artistic"],
+                "Multiplayer": ["multiplayer", "online", "coop", "mmo", "pvp", "co-op"],
+                "Puzzle": ["puzzle", "logic", "brain", "match", "solve", "thinking"],
+                "Horror": ["horror", "survival", "zombie", "scary", "fear", "dark"],
+                "Fighting": ["fighting", "martial", "combat", "fighter", "tekken", "street"]
+            }
+            
+            if genre in genre_keywords:
+                keywords = genre_keywords[genre]
+                text_to_check = f"{name} {short_description}"
+                return any(keyword in text_to_check for keyword in keywords)
+    except:
+        pass
+    
+    # Default to True if we can't determine (to avoid filtering too aggressively)
+    return True
+
+async def is_game_popular(game_data: dict, app_id: int) -> bool:
+    """Determine if a game is popular based on various indicators."""
+    try:
+        # Check for popularity indicators in the game data
+        name = game_data.get('name', '')
+        
+        # Skip games with very generic or placeholder names
+        skip_keywords = ['test', 'demo', 'beta', 'alpha', 'sample', 'placeholder']
+        if any(keyword in name.lower() for keyword in skip_keywords):
+            return False
+        
+        # Check if game has proper description (indicates it's a real game)
+        short_description = game_data.get('short_description', '')
+        if len(short_description) < 50:  # Too short description might indicate low quality
+            return False
+        
+        # Check if game has price (free games can be popular too, but prefer paid games with deals)
+        price_overview = game_data.get('price_overview')
+        if price_overview:
+            original_price = price_overview.get('initial', 0)
+            if original_price < 100:  # Less than ₹1 original price might be low quality
+                return False
+        
+        # Check metacritic score if available
+        metacritic = game_data.get('metacritic')
+        if metacritic and metacritic.get('score', 0) < 60:
+            return False
+        
+        # If we reach here, assume it's popular enough
+        return True
+        
+    except Exception as e:
+        logger.debug(f"Error checking popularity for {app_id}: {e}")
+        return True  # Default to popular if we can't determine
+
+async def send_deals_email(email: str, deals: list, is_immediate: bool = False, genre: str = "Any", age_preference: str = "any") -> bool:
     """Send deals email using Resend API."""
     try:
         import aiohttp
@@ -1013,9 +1245,20 @@ async def send_deals_email(email: str, deals: list, is_immediate: bool = False) 
             return False
         
         # Create email content
+        age_text = {
+            "old": "Classic & Retro",
+            "middle": "Modern",
+            "recent": "Latest",
+            "any": "All Time"
+        }
+        
         if is_immediate:
-            subject = f"🔥 TOP STEAM DEALS TODAY - Up to {deals[0]['discount']}% OFF!"
-            greeting = "Here are today's hottest Steam deals with the biggest discounts!"
+            if genre == "Any":
+                subject = f"🔥 TOP STEAM DEALS ({age_text[age_preference]}) - Up to {deals[0]['discount']}% OFF!"
+                greeting = f"Here are today's hottest {age_text[age_preference].lower()} Steam deals with the biggest discounts!"
+            else:
+                subject = f"🔥 TOP {genre.upper()} DEALS ({age_text[age_preference]}) - Up to {deals[0]['discount']}% OFF!"
+                greeting = f"Here are today's hottest {genre} deals from {age_text[age_preference].lower()} games!"
         else:
             subject = "🎮 Daily Steam Deals - Your Gaming Bargains"
             greeting = "Here are today's best Steam deals!"
