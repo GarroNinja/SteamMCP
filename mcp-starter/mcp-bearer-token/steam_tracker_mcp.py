@@ -857,67 +857,167 @@ async def send_top_deals_today(
         return f"❌ Error getting top deals: {str(e)}"
 
 async def get_todays_top_deals() -> list:
-    """Get top Steam deals with highest discounts."""
+    """Get top Steam deals with highest discounts by searching dynamically."""
     try:
-        # List of popular games to check for deals (you can expand this)
-        popular_app_ids = [
-            # Popular games that often have deals
-            1245620,  # PEAK
-            1091500,  # Cyberpunk 2077
-            292030,   # The Witcher 3
-            570,      # Dota 2
-            730,      # Counter-Strike 2
-            440,      # Team Fortress 2
-            271590,   # Grand Theft Auto V
-            359550,   # Tom Clancy's Rainbow Six Siege
-            578080,   # PUBG: BATTLEGROUNDS
-            435150,   # Divinity: Original Sin 2
-            1174180,  # Red Dead Redemption 2
-            413150,   # Stardew Valley
-            377160,   # Fallout 4
-            489830,   # The Elder Scrolls V: Skyrim Special Edition
-            1086940,  # Baldur's Gate 3
-        ]
-        
+        logger.info("Searching for top Steam deals dynamically...")
         deals = []
         
-        for app_id in popular_app_ids:
+        # Method 1: Search Steam Store Featured deals
+        deals.extend(await search_steam_featured_deals())
+        
+        # Method 2: Search popular categories for deals
+        popular_categories = [
+            "Action", "Adventure", "RPG", "Strategy", "Simulation", 
+            "Racing", "Sports", "Indie", "Multiplayer"
+        ]
+        
+        for category in popular_categories[:3]:  # Limit to avoid too many requests
             try:
-                game_data = await get_steam_price(app_id)
-                if game_data:
-                    price_overview = game_data.get('price_overview')
-                    name = game_data.get('name', f'Game {app_id}')
-                    
-                    if price_overview:
-                        discount = price_overview.get('discount_percent', 0)
-                        
-                        # Only include games with significant discounts (20% or more)
-                        if discount >= 20:
-                            current_price = price_overview.get('final', 0) / 100.0
-                            original_price = price_overview.get('initial', 0) / 100.0
-                            
-                            deals.append({
-                                'name': name,
-                                'app_id': app_id,
-                                'discount': discount,
-                                'current_price': current_price,
-                                'original_price': original_price,
-                                'currency': 'INR'
-                            })
-                            
+                category_deals = await search_category_deals(category)
+                deals.extend(category_deals)
             except Exception as e:
-                logger.debug(f"Error checking deals for app {app_id}: {e}")
+                logger.debug(f"Error searching {category} deals: {e}")
                 continue
         
-        # Sort by discount percentage (highest first)
-        deals.sort(key=lambda x: x['discount'], reverse=True)
+        # Method 3: Check Steam's special offers page
+        special_deals = await search_steam_specials()
+        deals.extend(special_deals)
         
-        # Return top 10 deals
-        return deals[:10]
+        # Remove duplicates based on app_id
+        unique_deals = {}
+        for deal in deals:
+            app_id = deal['app_id']
+            if app_id not in unique_deals or deal['discount'] > unique_deals[app_id]['discount']:
+                unique_deals[app_id] = deal
+        
+        # Convert back to list and filter for minimum discount
+        filtered_deals = [deal for deal in unique_deals.values() if deal['discount'] >= 30]
+        
+        # Sort by discount percentage (highest first)
+        filtered_deals.sort(key=lambda x: x['discount'], reverse=True)
+        
+        # Return top 15 deals
+        logger.info(f"Found {len(filtered_deals)} deals with 30%+ discounts")
+        return filtered_deals[:15]
         
     except Exception as e:
-        logger.error(f"Error getting top deals: {e}")
+        logger.error(f"Error getting dynamic top deals: {e}")
         return []
+
+async def search_steam_featured_deals() -> list:
+    """Search Steam's featured deals section."""
+    deals = []
+    try:
+        # Use Steam Store API to get featured items
+        async with aiohttp.ClientSession() as session:
+            # Steam's featured page often has deals
+            featured_url = "https://store.steampowered.com/api/featured/"
+            async with session.get(featured_url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    # Check featured items for deals
+                    if 'large_capsules' in data:
+                        for item in data['large_capsules'][:10]:  # Limit requests
+                            app_id = item.get('id')
+                            if app_id:
+                                deal = await check_app_for_deal(app_id)
+                                if deal:
+                                    deals.append(deal)
+                    
+                    # Check specials
+                    if 'specials' in data:
+                        for item in data['specials'][:10]:
+                            app_id = item.get('id')
+                            if app_id:
+                                deal = await check_app_for_deal(app_id)
+                                if deal:
+                                    deals.append(deal)
+                                    
+    except Exception as e:
+        logger.debug(f"Error searching featured deals: {e}")
+    
+    return deals
+
+async def search_category_deals(category: str) -> list:
+    """Search for deals in a specific category."""
+    deals = []
+    try:
+        # Search for games in category and check for deals
+        search_results = await find_steam_game(category)
+        
+        # Check first 15 results for deals to avoid too many API calls
+        for game in search_results[:15]:
+            app_id = game.get('appid')
+            if app_id:
+                deal = await check_app_for_deal(app_id)
+                if deal:
+                    deals.append(deal)
+                    
+    except Exception as e:
+        logger.debug(f"Error searching category {category}: {e}")
+    
+    return deals
+
+async def search_steam_specials() -> list:
+    """Search Steam's special offers."""
+    deals = []
+    try:
+        # Check some random popular app IDs that often have sales
+        import random
+        
+        # Generate some random app IDs in common ranges
+        random_ranges = [
+            range(200000, 300000),    # Older popular games
+            range(400000, 500000),    # Mid-era games  
+            range(1000000, 1200000),  # Newer games
+        ]
+        
+        sample_app_ids = []
+        for r in random_ranges:
+            sample_app_ids.extend(random.sample(r, 5))  # 5 from each range
+        
+        for app_id in sample_app_ids:
+            try:
+                deal = await check_app_for_deal(app_id)
+                if deal:
+                    deals.append(deal)
+            except:
+                continue  # Skip failed requests
+                
+    except Exception as e:
+        logger.debug(f"Error searching specials: {e}")
+    
+    return deals
+
+async def check_app_for_deal(app_id: int) -> dict | None:
+    """Check if a specific app has a good deal."""
+    try:
+        game_data = await get_steam_price(app_id)
+        if game_data:
+            price_overview = game_data.get('price_overview')
+            name = game_data.get('name', f'Game {app_id}')
+            
+            if price_overview:
+                discount = price_overview.get('discount_percent', 0)
+                
+                # Only return if discount is significant (30% or more)
+                if discount >= 30:
+                    current_price = price_overview.get('final', 0) / 100.0
+                    original_price = price_overview.get('initial', 0) / 100.0
+                    
+                    return {
+                        'name': name,
+                        'app_id': app_id,
+                        'discount': discount,
+                        'current_price': current_price,
+                        'original_price': original_price,
+                        'currency': 'INR'
+                    }
+    except Exception as e:
+        logger.debug(f"Error checking app {app_id}: {e}")
+    
+    return None
 
 async def send_deals_email(email: str, deals: list, is_immediate: bool = False) -> bool:
     """Send deals email using Resend API."""
