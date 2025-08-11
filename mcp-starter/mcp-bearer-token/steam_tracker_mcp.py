@@ -899,11 +899,13 @@ async def send_top_deals_today(
         
         if not top_deals:
             # If still no deals, try one more emergency fallback
-            logger.info("No deals found, trying emergency fallback...")
+            logger.warning("⚠️ No deals found from primary methods, trying emergency fallback...")
             try:
                 top_deals = await asyncio.wait_for(get_emergency_deals(), timeout=10.0)
-            except:
-                pass
+                logger.info(f"Emergency fallback returned {len(top_deals) if top_deals else 0} deals")
+            except Exception as e:
+                logger.error(f"Emergency fallback failed: {e}")
+                top_deals = []
         
         if not top_deals:
             return f"❌ No {genre} deals found for {age_preference} games today. Steam API might be slow. Try again later."
@@ -1153,17 +1155,45 @@ async def get_emergency_deals() -> list:
         1938090, # Call of Duty: Modern Warfare III
         524220,  # NieR:Automata
         1245620, # ELDEN RING
+        377160,  # Fallout 4
+        413150,  # Stardew Valley
+        431960,  # Wallpaper Engine
+        252490,  # Rust
+        578080,  # PUBG: BATTLEGROUNDS
     ]
     
+    logger.info(f"Emergency deals: Checking {len(emergency_app_ids)} popular games...")
     deals = []
+    
     for app_id in emergency_app_ids:
         try:
+            logger.debug(f"Checking emergency app {app_id}")
             deal = await check_app_for_deal(app_id)
             if deal:
+                logger.info(f"Emergency deal found: {deal['name']} - {deal['discount']}% off")
                 deals.append(deal)
-        except:
+            else:
+                # Even if no discount, add the game with current price for emergency
+                try:
+                    game_data = await get_steam_price(app_id)
+                    if game_data and game_data.get('price_overview'):
+                        price_overview = game_data['price_overview']
+                        deals.append({
+                            'name': game_data.get('name', f'Game {app_id}'),
+                            'app_id': app_id,
+                            'discount': 0,
+                            'current_price': price_overview.get('final', 0) / 100.0,
+                            'original_price': price_overview.get('initial', price_overview.get('final', 0)) / 100.0,
+                            'currency': 'INR'
+                        })
+                        logger.info(f"Emergency game added (no discount): {game_data.get('name')}")
+                except:
+                    continue
+        except Exception as e:
+            logger.debug(f"Error checking emergency app {app_id}: {e}")
             continue
     
+    logger.info(f"Emergency deals found: {len(deals)} games")
     return deals[:8]  # Return up to 8 emergency deals
 
 async def get_todays_top_deals() -> list:
@@ -1554,7 +1584,30 @@ async def send_deals_email(email: str, deals: list, is_immediate: bool = False, 
         </html>
         """
         
+        # Debug environment variables
+        logger.info(f"RESEND_API_KEY configured: {'Yes' if RESEND_API_KEY and RESEND_API_KEY != 'your_resend_api_key_here' else 'No'}")
+        logger.info(f"SENDER_EMAIL configured: {SENDER_EMAIL}")
+        logger.info(f"Number of deals to send: {len(deals)}")
+        
+        # Check if environment variables are properly configured
+        if not RESEND_API_KEY or RESEND_API_KEY == "your_resend_api_key_here":
+            logger.error("❌ RESEND_API_KEY not configured properly!")
+            return False
+            
+        if not SENDER_EMAIL or SENDER_EMAIL == "alerts@steamtracker.com":
+            logger.error("❌ SENDER_EMAIL not configured properly!")
+            return False
+        
         # Send email using Resend
+        email_payload = {
+            "from": SENDER_EMAIL,
+            "to": [email],
+            "subject": subject,
+            "html": html_content
+        }
+        
+        logger.info(f"Sending email to {email} with subject: {subject}")
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "https://api.resend.com/emails",
@@ -1562,19 +1615,16 @@ async def send_deals_email(email: str, deals: list, is_immediate: bool = False, 
                     "Authorization": f"Bearer {RESEND_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                json={
-                    "from": SENDER_EMAIL,
-                    "to": [email],
-                    "subject": subject,
-                    "html": html_content
-                }
+                json=email_payload
             ) as response:
+                response_text = await response.text()
+                logger.info(f"Resend API response: {response.status} - {response_text}")
+                
                 if response.status == 200:
-                    logger.info(f"Deals email sent successfully to {email}")
+                    logger.info(f"✅ Deals email sent successfully to {email}")
                     return True
                 else:
-                    error_text = await response.text()
-                    logger.error(f"Failed to send email: {response.status} - {error_text}")
+                    logger.error(f"❌ Failed to send email: {response.status} - {response_text}")
                     return False
                     
     except Exception as e:
