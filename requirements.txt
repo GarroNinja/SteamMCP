@@ -1,0 +1,22 @@
+# Steam Price Tracker MCP Server Dependencies
+
+# Core MCP Framework
+fastmcp>=0.1.0
+
+# Database
+asyncpg>=0.29.0
+
+# HTTP Client
+aiohttp>=3.9.0
+
+# Scheduling
+schedule>=1.2.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# Email Service
+resend>=0.8.0
+
+# Additional Python Standard Library (already included)
+# asyncio, threading, logging, json, re, os 
