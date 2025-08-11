@@ -990,9 +990,7 @@ async def send_top_deals_today(
         logger.error(f"Error sending top deals: {e}")
         return f"❌ Error getting top deals: {str(e)}"
 
-# =============================================================================
-# DEPRECATED FUNCTIONS - NO LONGER USED (kept for reference)
-# =============================================================================
+# Legacy functions (no longer called by main system)
 
 async def get_customized_top_deals_DEPRECATED(genre: str, age_preference: str) -> list:
     """DEPRECATED - Get customized Steam deals based on genre and age preferences, filtering for popular games."""
