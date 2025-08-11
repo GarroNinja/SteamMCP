@@ -383,6 +383,23 @@ mcp = FastMCP(
     auth=SimpleBearerAuthProvider(TOKEN),
 )
 
+# Add health check endpoint for Render
+@mcp.app.get("/")
+async def health_check():
+    """Health check endpoint for Render and other services."""
+    return {
+        "status": "healthy",
+        "service": "Steam Price Tracker MCP Server",
+        "mcp_endpoint": "/mcp/",
+        "version": "1.0.0",
+        "description": "MCP server for Steam game price tracking and alerts"
+    }
+
+@mcp.app.get("/health")
+async def health():
+    """Alternative health check endpoint."""
+    return {"status": "ok", "service": "Steam Price Tracker MCP"}
+
 # Required validate tool for Puch compatibility
 @mcp.tool
 async def validate() -> str:
@@ -1019,11 +1036,15 @@ async def main():
     try:
         await initialize_services()
         
-        logger.info("🎮 Starting Steam Price Tracker MCP Server on http://0.0.0.0:8091")
+        # Use Render's PORT environment variable or default to 8091
+        port = int(os.environ.get("PORT", 8091))
+        host = "0.0.0.0"
+        
+        logger.info(f"🎮 Starting Steam Price Tracker MCP Server on http://{host}:{port}")
         logger.info("🔗 Connect with: Bearer Token Authentication")
         logger.info("📧 Server ready for Steam game price tracking!")
         
-        await mcp.run_async("streamable-http", host="0.0.0.0", port=8091)
+        await mcp.run_async("streamable-http", host=host, port=port)
         
     except KeyboardInterrupt:
         logger.info("🛑 Server shutdown requested")
@@ -1032,7 +1053,8 @@ async def main():
         logger.info("🔄 Server will attempt to continue...")
         # Try to continue running even with errors
         try:
-            await mcp.run_async("streamable-http", host="0.0.0.0", port=8091)
+            port = int(os.environ.get("PORT", 8091))
+            await mcp.run_async("streamable-http", host="0.0.0.0", port=port)
         except Exception as e2:
             logger.error(f"💀 Fatal error: {e2}")
 
