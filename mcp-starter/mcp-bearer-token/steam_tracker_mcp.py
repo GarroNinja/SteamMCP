@@ -879,7 +879,12 @@ async def send_top_deals_today(
         logger.info(f"Fetching {genre} deals ({age_preference} games) for {email}")
         
         # Get customized top deals
-        top_deals = await get_customized_top_deals(genre, age_preference)
+        if genre == "Any" and age_preference == "any":
+            # For general "any" requests, use the original working method
+            top_deals = await get_todays_top_deals()
+        else:
+            # For specific preferences, use the customized method
+            top_deals = await get_customized_top_deals(genre, age_preference)
         
         if not top_deals:
             return f"❌ No {genre} deals found for {age_preference} games today. Try different preferences or check again later."
@@ -936,11 +941,11 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
             "Puzzle": ["puzzle", "logic", "brain", "match"],
             "Horror": ["horror", "survival", "zombie", "scary"],
             "Fighting": ["fighting", "martial", "combat", "tekken"],
-            "Any": ["popular", "best", "top", "award"]
+            "Any": ["grand", "call", "the", "steam", "game"]
         }
         
-        # Method 1: Genre-based search
-        if genre in genre_terms:
+        # Method 1: Genre-based search (skip for "Any" genre as it's not effective)
+        if genre in genre_terms and genre != "Any":
             for term in genre_terms[genre][:2]:  # Limit search terms
                 try:
                     search_results = await find_steam_game(term)
@@ -957,8 +962,12 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
         # Method 2: Sample from app ID ranges for the age preference (increased sampling)
         import random
         for app_range in age_ranges[age_preference]:
-            # Sample more apps to find more deals
-            sample_size = min(100, max(50, len(app_range) // 10000))  # Sample 50-100 apps per range
+            # Sample more apps to find more deals - extra aggressive for "Any" genre
+            if genre == "Any":
+                sample_size = min(200, max(100, len(app_range) // 5000))  # More samples for "Any"
+            else:
+                sample_size = min(100, max(50, len(app_range) // 10000))  # Sample 50-100 apps per range
+            
             sample_app_ids = random.sample(list(app_range), sample_size)
             
             for app_id in sample_app_ids:
@@ -1048,10 +1057,36 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
         popular_deals.sort(key=lambda x: x['discount'], reverse=True)
         
         logger.info(f"Found {len(popular_deals)} popular {genre} deals for {age_preference} games")
+        
+        # If we didn't find enough deals and this is "Any" genre, fallback to general method
+        if len(popular_deals) < 3 and genre == "Any":
+            logger.info(f"Too few deals found ({len(popular_deals)}), falling back to general method")
+            try:
+                fallback_deals = await get_todays_top_deals()
+                if fallback_deals:
+                    # Filter fallback deals by age preference if specified
+                    if age_preference != "any":
+                        filtered_deals = []
+                        for deal in fallback_deals:
+                            if is_in_age_range(deal['app_id'], age_ranges[age_preference]):
+                                filtered_deals.append(deal)
+                        return filtered_deals[:15] if filtered_deals else fallback_deals[:15]
+                    return fallback_deals[:15]
+            except Exception as fallback_error:
+                logger.error(f"Fallback method also failed: {fallback_error}")
+        
         return popular_deals[:15]  # Return top 15 deals
         
     except Exception as e:
         logger.error(f"Error getting customized deals: {e}")
+        # Try fallback for "Any" genre even on error
+        if genre == "Any":
+            try:
+                logger.info("Error occurred, trying fallback method for Any genre")
+                fallback_deals = await get_todays_top_deals()
+                return fallback_deals[:15] if fallback_deals else []
+            except:
+                pass
         return []
 
 async def get_todays_top_deals() -> list:
