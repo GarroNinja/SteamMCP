@@ -176,7 +176,7 @@ class DatabaseManager:
 
 # Steam API Helper Functions  
 async def find_steam_game(query: str):
-    """Simple, reliable Steam game search."""
+    """Enhanced Steam game search with fuzzy matching."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://api.steampowered.com/ISteamApps/GetAppList/v2/") as response:
@@ -197,24 +197,67 @@ async def find_steam_game(query: str):
                     name_lower = name.lower()
                     
                     # Skip technical entries
-                    if any(skip in name_lower for skip in ['dedicated server', 'sdk', 'authoring tools']):
+                    if any(skip in name_lower for skip in ['dedicated server', 'sdk', 'authoring tools', 'workshop', 'demo']):
                         continue
                     
-                    # Find matches
-                    if query_lower in name_lower:
+                    # Calculate similarity score
+                    similarity_score = calculate_similarity(query_lower, name_lower)
+                    
+                    # Include matches with good similarity or exact substring matches
+                    if query_lower in name_lower or similarity_score > 0.6:
                         matches.append({
                             'name': name,
                             'appid': app['appid'],
-                            'exact': query_lower == name_lower
+                            'exact': query_lower == name_lower,
+                            'similarity': similarity_score
                         })
                 
-                # Sort: exact matches first, then alphabetical
-                matches.sort(key=lambda x: (not x['exact'], x['name'].lower()))
-                return matches[:10]
+                # Sort: exact matches first, then by similarity score, then alphabetical
+                matches.sort(key=lambda x: (not x['exact'], -x['similarity'], x['name'].lower()))
+                return matches[:15]  # Return more matches
                 
     except Exception as e:
         logger.error(f"Search error: {e}")
         return []
+
+def calculate_similarity(query: str, name: str) -> float:
+    """Calculate similarity between query and game name using multiple methods."""
+    # Exact match
+    if query == name:
+        return 1.0
+    
+    # Substring match
+    if query in name:
+        return 0.9
+    
+    # Simple fuzzy matching for common variations
+    query_words = set(query.split())
+    name_words = set(name.split())
+    
+    if not query_words or not name_words:
+        return 0.0
+    
+    # Jaccard similarity (intersection over union)
+    intersection = len(query_words.intersection(name_words))
+    union = len(query_words.union(name_words))
+    
+    if union == 0:
+        return 0.0
+    
+    jaccard = intersection / union
+    
+    # Boost score if most words match
+    if intersection >= len(query_words) * 0.8:
+        jaccard += 0.2
+    
+    # Handle common variations
+    query_clean = query.replace("-", " ").replace(":", "").replace("'", "")
+    name_clean = name.replace("-", " ").replace(":", "").replace("'", "")
+    
+    if query_clean in name_clean or any(word in name_clean for word in query_clean.split() if len(word) > 3):
+        jaccard = max(jaccard, 0.7)
+    
+    return min(jaccard, 1.0)
 
 async def get_steam_price(app_id: int):
     """Get price for a specific Steam app ID."""
@@ -859,23 +902,23 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
         logger.info(f"Searching for {genre} deals in {age_preference} games...")
         deals = []
         
-        # Define App ID ranges based on age preferences
+        # Define App ID ranges based on age preferences (more accurate ranges)
         age_ranges = {
             "old": [
-                range(10, 50000),        # Very old Steam games (2003-2010)
-                range(50000, 200000),    # Classic games (2010-2015)
+                range(10, 100000),       # Very old Steam games (2003-2012)
+                range(100000, 300000),   # Classic games (2012-2016)
             ],
             "middle": [
-                range(200000, 600000),   # Mid-era games (2015-2019)
-                range(600000, 1000000),  # Late middle games (2019-2020)
+                range(300000, 800000),   # Mid-era games (2016-2019)
+                range(800000, 1200000),  # Late middle games (2019-2021)
             ],
             "recent": [
-                range(1000000, 1500000), # Recent games (2020-2022)
-                range(1500000, 2000000), # Very recent games (2022+)
+                range(1200000, 1800000), # Recent games (2021-2023)
+                range(1800000, 2500000), # Very recent games (2023+)
             ],
             "any": [
-                range(10, 500000),       # Mix of old and middle
-                range(500000, 2000000),  # Mix of middle and recent
+                range(10, 800000),       # Mix of old and middle
+                range(800000, 2500000),  # Mix of middle and recent
             ]
         }
         
@@ -911,11 +954,12 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
                     logger.debug(f"Error searching {term}: {e}")
                     continue
         
-        # Method 2: Sample from app ID ranges for the age preference
+        # Method 2: Sample from app ID ranges for the age preference (increased sampling)
         import random
         for app_range in age_ranges[age_preference]:
-            sample_size = min(25, len(app_range))  # Sample 25 apps per range
-            sample_app_ids = random.sample(app_range, sample_size)
+            # Sample more apps to find more deals
+            sample_size = min(100, max(50, len(app_range) // 10000))  # Sample 50-100 apps per range
+            sample_app_ids = random.sample(list(app_range), sample_size)
             
             for app_id in sample_app_ids:
                 try:
@@ -927,8 +971,15 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
                     deal = await check_popular_app_for_deal(app_id)
                     if deal:
                         deals.append(deal)
+                        # Stop early if we have enough deals for this method
+                        if len(deals) >= 50:
+                            break
                 except:
                     continue  # Skip failed requests
+            
+            # Stop if we have enough deals
+            if len(deals) >= 50:
+                break
         
         # Method 3: Check Steam featured for genre matches
         try:
@@ -941,6 +992,38 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
         except Exception as e:
             logger.debug(f"Error checking featured deals: {e}")
         
+        # Method 4: Check Steam specials for more deals
+        try:
+            special_deals = await search_steam_specials()
+            for deal in special_deals:
+                app_id = deal['app_id']
+                if is_in_age_range(app_id, age_ranges[age_preference]):
+                    if genre == "Any" or await game_matches_genre(app_id, genre):
+                        deals.append(deal)
+        except Exception as e:
+            logger.debug(f"Error checking special deals: {e}")
+        
+        # Method 5: Search for popular games from each genre
+        if genre != "Any" and genre in genre_terms:
+            popular_game_searches = [
+                "best", "top rated", "popular", "award winning", "indie hit"
+            ]
+            
+            for search_term in popular_game_searches:
+                try:
+                    combined_query = f"{search_term} {genre_terms[genre][0]}"
+                    search_results = await find_steam_game(combined_query)
+                    
+                    for game in search_results[:10]:
+                        app_id = game.get('appid')
+                        if app_id and is_in_age_range(app_id, age_ranges[age_preference]):
+                            deal = await check_popular_app_for_deal(app_id)
+                            if deal:
+                                deals.append(deal)
+                except Exception as e:
+                    logger.debug(f"Error searching {combined_query}: {e}")
+                    continue
+        
         # Remove duplicates and filter for popular games
         unique_deals = {}
         for deal in deals:
@@ -951,14 +1034,21 @@ async def get_customized_top_deals(genre: str, age_preference: str) -> list:
         # Filter for games with good popularity metrics and minimum discount
         popular_deals = [
             deal for deal in unique_deals.values() 
-            if deal['discount'] >= 25 and deal.get('is_popular', True)
+            if deal['discount'] >= 20 and deal.get('is_popular', True)  # Reduced minimum discount
         ]
+        
+        # If we don't have enough deals, try with lower discount threshold
+        if len(popular_deals) < 5:
+            popular_deals = [
+                deal for deal in unique_deals.values() 
+                if deal['discount'] >= 15 and deal.get('is_popular', True)
+            ]
         
         # Sort by discount percentage (highest first)
         popular_deals.sort(key=lambda x: x['discount'], reverse=True)
         
         logger.info(f"Found {len(popular_deals)} popular {genre} deals for {age_preference} games")
-        return popular_deals[:12]  # Return top 12 deals
+        return popular_deals[:15]  # Return top 15 deals
         
     except Exception as e:
         logger.error(f"Error getting customized deals: {e}")
@@ -1141,8 +1231,8 @@ async def check_popular_app_for_deal(app_id: int) -> dict | None:
             if price_overview and is_popular:
                 discount = price_overview.get('discount_percent', 0)
                 
-                # Only return if discount is significant (25% or more for popular games)
-                if discount >= 25:
+                # Only return if discount is significant (20% or more for popular games)
+                if discount >= 20:
                     current_price = price_overview.get('final', 0) / 100.0
                     original_price = price_overview.get('initial', 0) / 100.0
                     
@@ -1208,25 +1298,25 @@ async def is_game_popular(game_data: dict, app_id: int) -> bool:
         name = game_data.get('name', '')
         
         # Skip games with very generic or placeholder names
-        skip_keywords = ['test', 'demo', 'beta', 'alpha', 'sample', 'placeholder']
+        skip_keywords = ['test', 'demo', 'beta', 'alpha', 'sample', 'placeholder', 'sdk', 'tool']
         if any(keyword in name.lower() for keyword in skip_keywords):
             return False
         
         # Check if game has proper description (indicates it's a real game)
         short_description = game_data.get('short_description', '')
-        if len(short_description) < 50:  # Too short description might indicate low quality
+        if len(short_description) < 30:  # Reduced from 50 to 30
             return False
         
         # Check if game has price (free games can be popular too, but prefer paid games with deals)
         price_overview = game_data.get('price_overview')
         if price_overview:
             original_price = price_overview.get('initial', 0)
-            if original_price < 100:  # Less than ₹1 original price might be low quality
+            if original_price < 50:  # Reduced from ₹1 to ₹0.50 original price
                 return False
         
-        # Check metacritic score if available
+        # Check metacritic score if available (more lenient)
         metacritic = game_data.get('metacritic')
-        if metacritic and metacritic.get('score', 0) < 60:
+        if metacritic and metacritic.get('score', 0) < 50:  # Reduced from 60 to 50
             return False
         
         # If we reach here, assume it's popular enough
