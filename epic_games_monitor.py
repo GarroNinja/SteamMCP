@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import asyncpg
-from epic_games_api import EpicGamesAPI
+from working_epic_games_api import WorkingEpicGamesAPI as EpicGamesAPI
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
