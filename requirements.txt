@@ -1,4 +1,16 @@
-# Steam Price Tracker MCP Server Dependencies
+# Steam + Epic Price Tracker MCP Server Dependencies
+
+# Epic Store
+epicstore_api>=0.1.9
+
+# CloudSceaper
+cloudscraper>=1.2.71  
+
+# AioHTTPS
+aiohttp>=3.8.0
+
+# Schedule
+schedule>=1.2.0
 
 # Core MCP Framework
 fastmcp>=0.1.0
