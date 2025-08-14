@@ -1,144 +1,160 @@
-# Steam Price Tracker MCP Server
+# 🎮 Steam & Epic Games Price Tracker MCP Server
 
-A powerful Model Context Protocol (MCP) server for tracking Steam game prices, sending deals, and managing price alerts.
+A powerful **Model Context Protocol (MCP) server** for tracking game prices, sending deals, and managing price alerts across **Steam** and **Epic Games Store**.
 
-## Features
+---
 
-🎮 **Steam Game Search** - Search for games with prices and App IDs  
-📧 **Price Alerts** - Get notified when games drop below target prices  
-🔥 **Top Deals** - Instant email with today's hottest Steam deals  
-⏰ **Daily Deals** - Subscribe to daily deal notifications  
-💰 **Multi-user Support** - Full database support for multiple users  
+## ✨ Features
 
-## Quick Start
+### 🕹️ Steam Store
+- 🔍 Game Search - Search Steam games with prices and App IDs
+- 📉 Price Alerts - Get notified when games drop below target prices
+- 🔥 Top Deals - Instant email with today's hottest Steam deals
+- ⏰ Daily Deals - Subscribe to daily deal notifications
 
-### 1. Environment Setup
+### 🕹️ Epic Games Store
+- 🔍 Game Search - Search Epic Games Store with pricing information
+- 🆓 Free Games Tracking - Monitor Epic's weekly free games
+- 📉 Price Monitoring & Alerts - Track price changes and deals
+- 🔄 Cross-Platform Search - Search across Steam & Epic simultaneously
+- 📊 Price Comparison - Compare prices between Steam & Epic
 
-Create a `.env` file with your credentials:
+### 💡 Multi-User Support
+- 👥 Full database support for multiple users
+- 📧 Email notifications via Resend API or SMTP
 
-```env
-AUTH_TOKEN=your_bearer_token_here
-MY_NUMBER=your_phone_number
-DATABASE_URL=postgresql://user:password@host:port/database
-RESEND_API_KEY=your_resend_api_key
-SENDER_EMAIL=your@email.com
-```
+---
 
-### 2. Install Dependencies
+## 🚀 Quick Start
 
-```bash
-pip install -r requirements.txt
-```
+### 1️⃣ Environment Setup
 
-### 3. Start Server
+Create a `.env` file:
 
-```bash
-python steam_tracker_mcp.py
-```
+    # Steam
+    AUTH_TOKEN=your_bearer_token_here
+    MY_NUMBER=your_phone_number
+    DATABASE_URL=postgresql://user:password@host:port/database
+    RESEND_API_KEY=your_resend_api_key
+    SENDER_EMAIL=your@email.com
 
-### 4. Connect to MCP
+    # Epic Games (Optional)
+    EPIC_PRICE_CHECK_HOURS=12
+    EPIC_FREE_GAMES_CHECK_HOURS=6
+    EPIC_DEALS_TIME=22:30
+    SMTP_HOST=smtp.gmail.com
+    SMTP_PORT=587
+    SENDER_PASSWORD=your-app-password
+
+### 2️⃣ Install Dependencies
+
+    pip install -r requirements.txt
+    pip install epicstore_api cloudscraper aiohttp schedule
+
+### 3️⃣ Start Server
+
+    python steam_tracker_mcp.py
 
 Server runs on `http://0.0.0.0:8091` with Bearer Token authentication.
 
-## Available Tools
+---
 
-### Search Games
-```python
-search_steam_games(query="Cyberpunk 2077")
-```
+## 🛠️ MCP Tools
 
-### Price Alerts  
-```python
-setup_price_alert_by_appid(
-    app_id=1091500,
-    email="user@example.com", 
-    target_price=500
-)
-```
+### 🔹 Steam Tools
 
-### Top Deals
-```python
-send_top_deals_today(email="user@example.com")
-```
+    # Search games
+    search_steam_games(query="Cyberpunk 2077")
 
-### Daily Deals Subscription
-```python
-subscribe_daily_deals(email="user@example.com")
-```
+    # Price alerts
+    setup_price_alert_by_appid(app_id=1091500, email="user@example.com", target_price=500)
 
-### User Registration
-```python
-register_user(email="user@example.com")
-```
+    # Top deals today
+    send_top_deals_today(email="user@example.com")
 
-## Database Schema
+    # Subscribe to daily deals
+    subscribe_daily_deals(email="user@example.com")
 
-The server automatically creates these tables:
+    # User registration
+    register_user(email="user@example.com")
 
-- `steam_users` - User management
-- `steam_price_alerts` - Price tracking alerts  
-- `daily_deals_subscriptions` - Daily deal subscriptions
+### 🔹 Epic Games Tools
 
-## Configuration
+    # Search Epic Games Store
+    search_epic_games(query="Cyberpunk 2077", limit=10)
 
-- **Country Code**: Set to India (IN) for INR pricing
-- **Background Jobs**: Price checks every 12 hours, daily deals at 10:30 PM
-- **Email Provider**: Uses Resend API for notifications
-- **Steam APIs**: Official Steam Store API integration
+    # Get current free games
+    get_epic_free_games()
 
-## Deployment
+    # Set up price alerts
+    setup_epic_price_alert(epic_namespace="namespace", epic_offer_id="offer_id", email="user@example.com", target_price=29.99)
 
-### Render.com Deployment
+    # Subscribe to free games alerts
+    subscribe_epic_free_games_alerts(email="user@example.com")
 
-1. **Build Command**: `pip install -r requirements.txt`
-2. **Start Command**: `python steam_tracker_mcp.py`
-3. **Environment Variables**: Add your `.env` variables in dashboard
-4. **Port**: Server uses port 8091
+### 🔹 Multi-Platform Tools
 
-### Local Development
+    # Search across Steam and Epic
+    search_games_all_platforms(query="Hades", platforms="steam,epic", limit=10)
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+    # Compare prices between platforms
+    compare_game_prices(game_title="Control")
 
-# Create .env file with your credentials
-cp .env.example .env
+---
 
-# Start server
-python steam_tracker_mcp.py
-```
+## 🗄️ Database Schema
 
-## File Structure
+- steam_users - User management
+- steam_price_alerts - Steam price alerts
+- daily_deals_subscriptions - Steam daily deals
+- epic_price_alerts - Epic price alerts
+- epic_free_games_subscriptions - Epic free game alerts
 
-```
-SteamMCP/
-├── steam_tracker_mcp.py    # Main MCP server
-├── requirements.txt        # Dependencies
-├── README.md              # This file
-├── LICENSE                # License file
-├── .gitignore            # Git ignore rules
-└── .env                  # Environment variables (not in repo)
-```
+---
 
-## Production Features
+## ⚡ Deployment
 
-- ✅ Graceful database failure handling (search-only mode)
-- ✅ Comprehensive error handling and logging
-- ✅ Bearer token authentication for security
-- ✅ Async/await for optimal performance
-- ✅ Background job scheduling
-- ✅ Multi-user database support
+### 🌐 Render.com Deployment
+1. Build Command: `pip install -r requirements.txt`
+2. Start Command: `python steam_tracker_mcp.py`
+3. Environment Variables: Add `.env` variables in dashboard
+4. Port: 8091
 
-## API Integration
+### 🖥️ Local Development
 
-- **Steam Store API**: For game pricing and details
-- **Steam Apps API**: For game search and App ID lookup
-- **Resend API**: For email notifications
-- **PostgreSQL**: For user and alert data storage
+    pip install -r requirements.txt
+    cp .env.example .env
+    python steam_tracker_mcp.py
 
-## Support
+---
 
-- Steam API integration for accurate pricing
+## ✅ Production Features
+
+- Graceful database failure handling (search-only mode)
+- Comprehensive error handling and logging
+- Bearer token authentication
+- Async/await for optimal performance
+- Background job scheduling
+- Multi-user support
+- Multi-platform price tracking
+
+---
+
+## 📊 Multi-Platform Coverage
+
+Feature              | Steam       | Epic Games
+-------------------- | ----------- | -------------
+Game Search           | ✅ Full API | ✅ Working
+Price Alerts          | ✅ Full    | ✅ Working
+Free Games            | ⚠️ Limited | ✅ Excellent
+Daily Deals           | ✅ Full    | ✅ Working
+Email Alerts          | ✅ Full    | ✅ Full
+
+**Your MCP server now covers both major PC gaming platforms!** 🎯
+
+## 💬 Support
+
+- Steam & Epic API integration for accurate pricing
 - Multi-currency support (currently INR)
 - Robust error handling and recovery
-- Comprehensive logging for debugging 
+- Comprehensive logging for debugging
